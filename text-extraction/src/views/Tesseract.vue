@@ -1,0 +1,11 @@
+<script setup>
+import TesseractOcr from '../components/Tesseract.vue'  // ajusta la ruta si cambió
+</script>
+
+<template>
+  <section style="padding:1rem">
+    <h2>Tesseract</h2>
+    <p>Sube una imagen y extrae texto.</p>
+    <TesseractOcr />
+  </section>
+</template>
