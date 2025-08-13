@@ -29,11 +29,32 @@ function fixOcrMonthGlitches(s) {
         .replace(/\bSe[p\|\]]/gi, 'Sep')
 }
 
+// Elimina una letra suelta justo antes de una referencia numérica larga
+// - Soporta letras unicode (\p{L})
+// - Funciona aunque haya saltos de línea, ":" u otros entre medias
+// - Prioriza el contexto de "REFERENCIA"
+function fixOcrRefGlitches(s) {
+    return String(s)
+        // Caso preferente: después de la palabra REFERENCIA (en la misma línea o la siguiente)
+        .replace(
+            /(\brefe?rencia\b[^\S\r\n]*[:]?[\s\r\n]+)\p{L}\b(?=\s*\d[\d\s-]{8,}\b)/giu,
+            '$1'
+        )
+        // Fallback global: cualquier letra suelta antes de 9+ dígitos (por si el OCR no detectó "REFERENCIA")
+        .replace(
+            /\b\p{L}\b(?=\s*\d[\d\s-]{8,}\b)/giu,
+            ''
+        )
+        // Limpia espacios sobrantes
+        .replace(/[^\S\r\n]{2,}/g, ' ')
+        .trim();
+}
+
 const norm = s =>
-    String(s ?? '')
-        .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-        .replace(/[^\S\r\n]+/g, ' ') // espacios
-        .trim()
+String(s ?? '')
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .replace(/[^\S\r\n]+/g, ' ') // espacios
+    .trim()
 
 const linesOf = s => norm(s).split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -114,7 +135,7 @@ function findTotal(text, profile) {
         }
     }
     // fallback: mayor cantidad global
-    const amounts = [...text.matchAll(new RegExp(profile.amountRegex, 'g'))]
+    const amounts = [...text.matchAll(new RegExp(profile.amountRegex.source, 'gi'))]
     .map(m => ({ raw: m[0], val: normalizeAmount(m[1]) }))
     .filter(a => a.val != null)
     if (amounts.length) {
@@ -126,13 +147,13 @@ function findTotal(text, profile) {
 
 function findStore(text, profile) {
     const L = linesOf(text)
-    const ctx = findByHints(L, profile.storeHints, 2)
+    const ctx = findByHints(L, profile.storeHints, 1)
     if (ctx) {
         // Toma la misma línea o la siguiente como nombre/dirección
         const cand = ctx.window.join(' ')
         // recorta etiqueta
         const cleaned = cand.replace(/^(sucursal|tienda|lugar|domicilio|direccion)\s*[:\-]?\s*/i, '')
-        return { value: cleaned.slice(0, 80), source: 'hint', confidence: 0.7 }
+        return { value: cleaned.slice(0, 80), source: 'hint', confidence: 0.8 }
     }
     // fallback: primera línea significativa
     return { value: linesOf(text)[0]?.slice(0, 80) ?? null, source: 'topline', confidence: 0.4 }
@@ -140,25 +161,61 @@ function findStore(text, profile) {
 
 function findReference(text, profile) {
     const L = linesOf(text)
-    const ctx = findByHints(L, profile.refHints, 2)
-    if (ctx) {
-        const m = ctx.joined.match(/([A-Z0-9\-]{6,})/)
-        if (m) return { value: m[1], source: 'hint+alnum', confidence: 0.75 }
-        // o dígitos largos
-        const d = ctx.joined.match(/\b(\d{6,})\b/)
-        if (d) return { value: d[1], source: 'hint+digits', confidence: 0.7 }
+    const ctx = findByHints(L, profile.refHints, 2) // puedes bajar a 1 si quieres ventana más corta
+    const tryExtract = (str) => {
+        // 1) PRIORIDAD: dígitos largos (permitiendo espacios/guiones intermedios)
+        //    evita montos con decimales: descartamos si trae ,00 o .00 al final
+        const mDigits = str.match(/\b(\d[\d\s-]{8,})\b/)
+        if (mDigits) {
+            const raw = mDigits[1]
+            if (/[.,]\d{2}\b/.test(raw)) {
+            // parece monto (tiene decimales), sáltalo
+            } else {
+                const value = raw.replace(/[^\d]/g, '') // normaliza a solo dígitos
+                return { value, raw, source: 'digits', confidence: 0.85 }
+            }
+        }
+
+    // 2) ALFANUM largo (por si tus referencias llevan letras)
+        const mAlnum = str.match(/([A-Z0-9\-]{8,})/i)
+        if (mAlnum) {
+            const raw = mAlnum[1]
+            const value = raw.replace(/\s+/g, '')
+            return { value, raw, source: 'alnum', confidence: 0.7 }
+        }
+
+        return null
     }
+
+    // Primero, intenta en el contexto de pistas (línea de "REFERENCIA" y cercanas)
+    if (ctx) {
+        const local = fixOcrRefGlitches(ctx.joined);
+        const found = tryExtract(local)
+        if (found) return found
+        // Plan B: sólo la misma línea del match (por si la siguiente línea mete ruido)
+        const sameLine = fixOcrRefGlitches(L[ctx.index] || '');
+        const found2 = tryExtract(sameLine)
+        if (found2) return found2
+    }
+
+    // Fallback global en todo el texto (por si las pistas fallaron)
+    const global = tryExtract(fixOcrRefGlitches(text));
+    if (global) return { ...global, source: global.source + '+global', confidence: Math.max(global.confidence, 0.7) }
+
     return null
 }
 
 export function parseTicket(ocrText, profileKey = 'mi_tienda') {
     const profile = profiles[profileKey] ?? profiles.mi_tienda
-    let text = norm(ocrText)
+    let text = fixOcrRefGlitches(String(ocrText || ''))
+    text = norm(text)
     text = fixOcrMonthGlitches(text)
+    text = fixOcrRefGlitches(text)
     const fecha = findDate(text, profile)
     const total = findTotal(text, profile)
     const sucursal = findStore(text, profile)
     const referencia = findReference(text, profile)
+
 
   // score simple
     const conf = {
@@ -168,6 +225,20 @@ export function parseTicket(ocrText, profileKey = 'mi_tienda') {
         referencia: referencia?.confidence ?? 0,
     }
     const overall = Object.values(conf).reduce((a,b)=>a+b,0) / 4
+    const MIN_CONF = 0.80;
+
+    const fails = [];
+    if (!fecha?.value || conf.fecha < MIN_CONF)      fails.push(`fecha`);
+    if (total?.value == null || conf.total < MIN_CONF)   fails.push(`total`);
+    if (!sucursal?.value || conf.sucursal < MIN_CONF)    fails.push(`sucursal`);
+    if (!referencia?.value || conf.referencia < MIN_CONF) fails.push(`referencia`);
+
+    if (fails.length) {
+        throw new Error(
+            `No se detectaron los siguientes campos: ${fails.join(', ')}. ` +
+            ` Sube una foto con mejor calidad.`
+        );
+    }
 
     return {
         ok: overall >= 0.6,
