@@ -1,16 +1,15 @@
 <script setup>
 import { ref, onBeforeUnmount } from 'vue'
-import Tesseract from 'tesseract.js'
+import { extractTicketFromFile } from '../ocr/pipeline'   // ⬅️ nuevo
 import { parseTicket } from '../utils/parseTicket'
 
 const file = ref(null)
 const imageURL = ref('')
 const text = ref('')
 const progress = ref(0)
-const lang = ref('spa')
 const loading = ref(false)
 const error = ref('')
-const parsed = ref(null) // 👈 estado para los campos extraídos
+const parsed = ref(null) // lo dejamos pero no lo usamos por ahora
 
 const revoke = () => {
   if (imageURL.value) URL.revokeObjectURL(imageURL.value)
@@ -26,7 +25,6 @@ const onFileChange = (e) => {
   error.value = ''
   progress.value = 0
   parsed.value = null
-  // permite volver a subir el mismo archivo
   e.target.value = ''
 }
 
@@ -39,19 +37,17 @@ const runOCR = async () => {
   parsed.value = null
 
   try {
-    const { data } = await Tesseract.recognize(file.value, lang.value, {
-      logger: (m) => {
-        if (m.status === 'recognizing text' && m.progress != null) {
-          progress.value = Math.round(m.progress * 100)
-        }
-      }
+    const res = await extractTicketFromFile(file.value, {
+      languages: 'eng+spa',
+      onProgress: (p) => { if (p != null) progress.value = Math.round(p * 100) },
+      verbose: true
     })
-    text.value = data.text || ''
-    // 👇 parsea inmediatamente después del OCR
-    parsed.value = parseTicket(text.value, 'mi_tienda')
-    console.log('ticket:', parsed.value)
+    text.value = res.text || ''
+    parsed.value = parseTicket(text.value)
+    console.log('parsed:', parsed.value)
   } catch (err) {
     error.value = String(err?.message || err)
+    console.error(err)
   } finally {
     loading.value = false
   }
@@ -66,10 +62,6 @@ onBeforeUnmount(revoke)
 
     <div class="controls">
       <input type="file" accept="image/*" @change="onFileChange" />
-      <select v-model="lang" title="Idioma OCR">
-        <option value="eng">Inglés (eng)</option>
-        <option value="spa">Español (spa)</option>
-      </select>
       <button :disabled="!file || loading" @click="runOCR">
         {{ loading ? 'Procesando...' : 'Extraer texto' }}
       </button>
@@ -89,17 +81,31 @@ onBeforeUnmount(revoke)
     <textarea v-model="text" rows="10" placeholder="Aquí aparecerá el texto..." readonly />
   </div>
 
-  <!-- 👇 solo muestra cuando ya hay parsed -->
   <div v-if="parsed" class="card">
     <h3>Campos detectados</h3>
     <ul>
       <li><b>Fecha:</b> {{ parsed.fields.fecha || '—' }}</li>
-      <li><b>Total:</b> {{ (parsed.fields.total ?? parsed.fields.totalRaw) || '—' }}</li>
-      <li><b>Sucursal:</b> {{ parsed.fields.sucursal || '—' }}</li>
       <li><b>Referencia:</b> {{ parsed.fields.referencia || '—' }}</li>
+      <li><b>Monto (Amount):</b> {{ parsed.fields.amount ?? '—' }}</li>
+      <li><b>Fees:</b> {{ parsed.fields.fees ?? '—' }}</li>
+      <li><b>Otros:</b> {{ parsed.fields.other ?? '—' }}</li>
+      <li><b>Impuestos (Taxes):</b> {{ parsed.fields.taxes ?? '—' }}</li>
+      <li><b>Descuento:</b> {{ parsed.fields.discount ?? '—' }}</li>
+      <li><b>Total a pagar (Total due):</b> {{ parsed.fields.totalDue ?? '—' }}</li>
+      <li><b>Total al beneficiario:</b> {{ parsed.fields.recipient ?? '—' }}</li>
+      <li><b>Tipo de cambio:</b> {{ parsed.fields.exchangeRate ?? '—' }}</li>
     </ul>
-    <small>Confianza: {{ Math.round((parsed.confidence.overall || 0) * 100) }}%</small>
+
+    <div v-if="parsed.issues?.length" style="margin-top:.5rem">
+      <b>Ajustes/avisos:</b>
+      <ul>
+          <li v-for="(it, idx) in parsed.issues" :key="idx">{{ it }}</li>
+      </ul>
+    </div>
+
+    <small>Confianza global: {{ Math.round((parsed.confidence.overall || 0) * 100) }}%</small>
   </div>
+
 </template>
 
 <style scoped>

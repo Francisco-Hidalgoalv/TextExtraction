@@ -1,255 +1,200 @@
-import { profiles } from './ticketProfiles'
+// src/utils/parseTicket.js
+// Parser para ticket Intermex (sin perfiles externos)
 
-const MONTHS = {
-    ene: 1, enero: 1, jan: 1, january: 1,
-    feb: 2, febrero: 2,
-    mar: 3, marzo: 3,
-    abr: 4, abril: 4, apr: 4, april: 4,
-    may: 5, mayo: 5,
-    jun: 6, junio: 6,
-    jul: 7, julio: 7,
-    ago: 8, agosto: 8, aug: 8, august: 8,
-    sep: 9, sept: 9, set: 9, septiembre: 9, september: 9,
-    oct: 10, octubre: 10,
-    nov: 11, noviembre: 11, november: 11,
-    dic: 12, diciembre: 12, dec: 12, december: 12,
-}
-
-function parseMonthName(token) {
-    const clean = String(token || '')
-        .toLowerCase()
-        .replace(/[^a-záéíóúüñ]/g, '')
-    return MONTHS[clean] ?? MONTHS[clean.slice(0,3)] ?? (clean === 'ju' ? 7 : null)
-}
-
-// Corrige artefactos típicos (p. ej. "Ju]" -> "Jul")
-function fixOcrMonthGlitches(s) {
-    return String(s)
-        .replace(/\bJu[\]\|]/gi, 'Jul') // Ju] o Ju| -> Jul
-        .replace(/\bSe[p\|\]]/gi, 'Sep')
-}
-
-// Elimina una letra suelta justo antes de una referencia numérica larga
-// - Soporta letras unicode (\p{L})
-// - Funciona aunque haya saltos de línea, ":" u otros entre medias
-// - Prioriza el contexto de "REFERENCIA"
-function fixOcrRefGlitches(s) {
-    return String(s)
-        // Caso preferente: después de la palabra REFERENCIA (en la misma línea o la siguiente)
-        .replace(
-            /(\brefe?rencia\b[^\S\r\n]*[:]?[\s\r\n]+)\p{L}\b(?=\s*\d[\d\s-]{8,}\b)/giu,
-            '$1'
-        )
-        // Fallback global: cualquier letra suelta antes de 9+ dígitos (por si el OCR no detectó "REFERENCIA")
-        .replace(
-            /\b\p{L}\b(?=\s*\d[\d\s-]{8,}\b)/giu,
-            ''
-        )
-        // Limpia espacios sobrantes
-        .replace(/[^\S\r\n]{2,}/g, ' ')
-        .trim();
-}
-
-const norm = s =>
-String(s ?? '')
+const norm = (s) =>
+  String(s ?? '')
     .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-    .replace(/[^\S\r\n]+/g, ' ') // espacios
+    .replace(/[^\S\r\n]+/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
     .trim()
 
-const linesOf = s => norm(s).split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-
-function findByHints(lines, hints, lookAhead = 2) {
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        if (hints?.some(h => h.test(line))) {
-            // Buscar en esta línea y las siguientes 'lookAhead'
-            const window = lines.slice(i, i + 1 + lookAhead)
-            return { index: i, window, joined: window.join(' ') }
-        }
-    }
-    return null
-}
-
-function findDate(text, profile) {
-    const L = linesOf(text)
-
-    const monthNameRx = /\b([A-Za-z\]\|]{2,12})\.?\s+([0-3]?\d),?\s+(\d{4})\b/
-    let m = text.match(monthNameRx)
-    if (m) {
-        const mm = parseMonthName(m[1])
-        const dd = m[2]
-        const yyyy = m[3]
-        if (mm) {
-            const iso = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`
-            return { value: iso, raw: m[0], source: 'monthName', confidence: 0.9 }
-        }
-    }
-
-    // 1) por pista (“Fecha”)
-    const ctx = findByHints(L, profile.dateHints, 2)
-    if (ctx) {
-        for (const rx of profile.dateRegexes) {
-            const m = ctx.joined.match(rx)
-            if (m) return { value: m[0], source: 'hint+regex', confidence: 0.9 }
-        }
-    }
-  // 2) global por regex
-    for (const rx of profile.dateRegexes) {
-        const m = text.match(rx)
-        if (m) return { value: m[0], source: 'regex', confidence: 0.7 }
-    }
-    return null
-}
+const linesOf = (s) =>
+  norm(s).split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
 function normalizeAmount(raw) {
-    if (!raw) return null
-    // Convierte 1.234,56 o 1,234.56 -> número JS
-    const cleaned = raw.replace(/[^0-9.,-]/g, '')
-    // Asumimos coma como decimal si existen ambos
-    let num = cleaned
-    if (cleaned.includes('.') && cleaned.includes(',')) {
-        num = cleaned.replace(/\./g, '').replace(',', '.')
-    } else if (cleaned.includes(',')) {
-        // Probable decimal latino
-        const parts = cleaned.split(',')
-        if (parts[parts.length - 1].length === 2) {
-            num = cleaned.replace(/\./g, '').replace(',', '.')
-        } else {
-        num = cleaned.replace(/,/g, '')
-        }
+  if (!raw) return null
+  const cleaned = raw.replace(/[^0-9.,-]/g, '')
+  let num = cleaned
+  if (cleaned.includes('.') && cleaned.includes(',')) {
+    num = cleaned.replace(/\./g, '').replace(',', '.')
+  } else if (cleaned.includes(',')) {
+    const parts = cleaned.split(',')
+    if (parts[parts.length - 1].length === 2) {
+      num = cleaned.replace(/\./g, '').replace(',', '.')
+    } else {
+      num = cleaned.replace(/,/g, '')
     }
-    const val = Number(num)
-    return isNaN(val) ? null : val
+  }
+  const v = Number(num)
+  return Number.isFinite(v) ? v : null
 }
 
-function findTotal(text, profile) {
-    const L = linesOf(text)
-    const ctx = findByHints(L, profile.totalHints, 2)
-    if (ctx) {
-        const m = ctx.joined.match(profile.amountRegex)
-        if (m) return {
-        raw: m[0],
-        value: normalizeAmount(m[1]),
-        source: 'hint+amount',
-        confidence: 0.92
+const AMT_RX = /(?:USD|US\$|\$)?\s*([0-9]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2}))/i
+
+function findByLabel(lines, labelRegexes, lookAhead = 2) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (labelRegexes.some(rx => rx.test(line))) {
+      // buscar monto en la misma línea o siguientes
+      for (let j = i; j <= Math.min(i + lookAhead, lines.length - 1); j++) {
+        const m = lines[j].match(AMT_RX)
+        if (m) {
+          return { raw: m[0], value: normalizeAmount(m[1]), source: 'label', idx: i }
         }
+      }
     }
-    // fallback: mayor cantidad global
-    const amounts = [...text.matchAll(new RegExp(profile.amountRegex.source, 'gi'))]
-    .map(m => ({ raw: m[0], val: normalizeAmount(m[1]) }))
-    .filter(a => a.val != null)
-    if (amounts.length) {
-        const top = amounts.sort((a, b) => b.val - a.val)[0]
-        return { raw: top.raw, value: top.val, source: 'maxAmount', confidence: 0.6 }
+  }
+  return null
+}
+
+function findDate(text) {
+  // 1) 04/10/2024 3:58 PM  ó  04/10/2024
+  let m = text.match(/\b(0?[1-9]|1[0-2])\/([0-2]?\d|3[01])\/(\d{4})(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?\b/i)
+  if (m) {
+    const [ , mm, dd, yyyy ] = m
+    const iso = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`
+    return { value: iso, raw: m[0], source: 'mdy', confidence: 0.9 }
+  }
+  // 2) “Apr 10, 2024” por si acaso
+  m = text.match(/\b([A-Za-z]{3,})\.?\s+([0-3]?\d),?\s+(\d{4})\b/)
+  if (m) {
+    const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 }
+    const mm = MONTHS[m[1].slice(0,3).toLowerCase()]
+    if (mm) {
+      const dd = m[2], yyyy = m[3]
+      const iso = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`
+      return { value: iso, raw: m[0], source: 'monthName', confidence: 0.85 }
+    }
+  }
+  return null
+}
+
+function parseIntermex(text) {
+  const L = linesOf(text)
+
+  // ---------- IDs/encabezados útiles ----------
+  const refMatch = text.match(/\b[A-Z]{2,3}-\d{3,5}\s*-\s*\d{3,}\b/) // p.ej. NY-1255 - 16997
+  const referencia = refMatch ? { value: refMatch[0].replace(/\s+/g,' ').trim(), source: 'pattern', confidence: 0.8 } : null
+
+  const fecha = findDate(text)
+
+  // ---------- Montos por etiqueta ----------
+  const amount = findByLabel(L, [/monto\/?transfer amount/i, /\bamount\b/i])
+  const fees = findByLabel(L, [/cargos\/?transf\.? en cash/i, /fees paid in cash/i, /\bfees\b/i])
+  const other = findByLabel(L, [/otros\s*\/\s*other chg/i, /\bother/i])
+  const taxes = findByLabel(L, [/estado cargos\s*\/\s*transfer\s*taxes/i, /\btaxes?\b/i])
+  const discount = findByLabel(L, [/descuento\s*\/\s*discount/i, /\bdiscount\b/i])
+  const totalDue = findByLabel(L, [/total a pagar\s*\/\s*total due/i, /\btotal due\b/i], 2)
+  const recipient = findByLabel(L, [/monto a entregar\s*\/\s*total to recipient/i, /total to recipient/i], 2)
+  const xrate = (() => {
+    // Tipo de Cambio / Exchange Rate: $ 1.0000
+    const i = L.findIndex(line => /tipo de cambio|exchange rate/i.test(line))
+    if (i >= 0) {
+      for (let j = i; j <= Math.min(i+2, L.length-1); j++) {
+        const m = L[j].match(/([0-9]+(?:[.,][0-9]{1,4})?)/)
+        if (m) {
+          const v = normalizeAmount(m[1])
+          if (v != null) return { raw: m[0], value: v, source: 'label', confidence: 0.85 }
+        }
+      }
     }
     return null
-}
+  })()
 
-function findStore(text, profile) {
-    const L = linesOf(text)
-    const ctx = findByHints(L, profile.storeHints, 1)
-    if (ctx) {
-        // Toma la misma línea o la siguiente como nombre/dirección
-        const cand = ctx.window.join(' ')
-        // recorta etiqueta
-        const cleaned = cand.replace(/^(sucursal|tienda|lugar|domicilio|direccion)\s*[:\-]?\s*/i, '')
-        return { value: cleaned.slice(0, 80), source: 'hint', confidence: 0.8 }
-    }
-    // fallback: primera línea significativa
-    return { value: linesOf(text)[0]?.slice(0, 80) ?? null, source: 'topline', confidence: 0.4 }
-}
+  // ---------- Validación/Corrección contable ----------
+  const f = {
+    amount: amount?.value ?? null,
+    fees: fees?.value ?? null,
+    other: other?.value ?? null,
+    taxes: taxes?.value ?? null,
+    discount: discount?.value ?? null,
+    totalDue: totalDue?.value ?? null,
+    recipient: recipient?.value ?? null,
+    exchangeRate: xrate?.value ?? null,
+  }
 
-function findReference(text, profile) {
-    const L = linesOf(text)
-    const ctx = findByHints(L, profile.refHints, 2) // puedes bajar a 1 si quieres ventana más corta
-    const tryExtract = (str) => {
-        // 1) PRIORIDAD: dígitos largos (permitiendo espacios/guiones intermedios)
-        //    evita montos con decimales: descartamos si trae ,00 o .00 al final
-        const mDigits = str.match(/\b(\d[\d\s-]{8,})\b/)
-        if (mDigits) {
-            const raw = mDigits[1]
-            if (/[.,]\d{2}\b/.test(raw)) {
-            // parece monto (tiene decimales), sáltalo
-            } else {
-                const value = raw.replace(/[^\d]/g, '') // normaliza a solo dígitos
-                return { value, raw, source: 'digits', confidence: 0.85 }
-            }
+  const issues = []
+
+  // 1) Alinea Amount con Recipient si ambos existen y difieren poco
+  if (f.amount != null && f.recipient != null && Math.abs(f.amount - f.recipient) <= 0.5 && f.amount !== f.recipient) {
+    issues.push(`Ajuste: amount ${f.amount} → ${f.recipient} (igualado a recipient).`)
+    f.amount = f.recipient
+  }
+
+  // 2) Si falta amount pero hay recipient, usa recipient
+  if (f.amount == null && f.recipient != null) {
+    f.amount = f.recipient
+    issues.push('Inferido amount desde recipient.')
+  }
+
+  // 3) Calcula total esperado
+  const plus = (a) => (typeof a === 'number') ? a : 0
+  const expected = plus(f.amount) + plus(f.fees) + plus(f.other) + plus(f.taxes) - plus(f.discount)
+  const round2 = (x) => Math.round(x * 100) / 100
+  const exp2 = round2(expected)
+
+  if (f.totalDue == null && exp2 > 0) {
+    f.totalDue = exp2
+    issues.push(`Inferido totalDue=${exp2} a partir de amount/fees/other/taxes/discount.`)
+  } else if (f.totalDue != null && Math.abs(f.totalDue - exp2) > 0.06 && exp2 > 0) {
+    // si difiere, si recipient presente y cuadra mejor usando recipient como amount, corrige
+    if (f.recipient != null) {
+      const expWithRec = round2(plus(f.recipient) + plus(f.fees) + plus(f.other) + plus(f.taxes) - plus(f.discount))
+      if (Math.abs(expWithRec - f.totalDue) <= Math.abs(exp2 - f.totalDue)) {
+        if (f.amount !== f.recipient) {
+          issues.push(`Ajuste: amount ${f.amount ?? 'null'} → ${f.recipient} para cuadrar con totalDue.`)
+          f.amount = f.recipient
         }
-
-    // 2) ALFANUM largo (por si tus referencias llevan letras)
-        const mAlnum = str.match(/([A-Z0-9\-]{8,})/i)
-        if (mAlnum) {
-            const raw = mAlnum[1]
-            const value = raw.replace(/\s+/g, '')
-            return { value, raw, source: 'alnum', confidence: 0.7 }
-        }
-
-        return null
+      } else {
+        issues.push(`Aviso: totalDue (${f.totalDue}) no cuadra con suma (${exp2}).`)
+      }
+    } else {
+      issues.push(`Aviso: totalDue (${f.totalDue}) no cuadra con suma (${exp2}).`)
     }
+  }
 
-    // Primero, intenta en el contexto de pistas (línea de "REFERENCIA" y cercanas)
-    if (ctx) {
-        const local = fixOcrRefGlitches(ctx.joined);
-        const found = tryExtract(local)
-        if (found) return found
-        // Plan B: sólo la misma línea del match (por si la siguiente línea mete ruido)
-        const sameLine = fixOcrRefGlitches(L[ctx.index] || '');
-        const found2 = tryExtract(sameLine)
-        if (found2) return found2
-    }
+  // ---------- Confianzas ----------
+  const conf = {
+    fecha: fecha?.confidence ?? 0,
+    referencia: referencia?.confidence ?? 0,
+    amount: amount ? 0.9 : (f.amount != null ? 0.75 : 0),
+    fees: fees ? 0.9 : (f.fees != null ? 0.7 : 0),
+    other: other ? 0.85 : (f.other != null ? 0.65 : 0),
+    taxes: taxes ? 0.85 : (f.taxes != null ? 0.65 : 0),
+    discount: discount ? 0.85 : (f.discount != null ? 0.65 : 0),
+    totalDue: totalDue ? 0.92 : (f.totalDue != null ? 0.8 : 0),
+    recipient: recipient ? 0.92 : (f.recipient != null ? 0.8 : 0),
+    exchangeRate: xrate ? 0.85 : (f.exchangeRate != null ? 0.7 : 0),
+  }
 
-    // Fallback global en todo el texto (por si las pistas fallaron)
-    const global = tryExtract(fixOcrRefGlitches(text));
-    if (global) return { ...global, source: global.source + '+global', confidence: Math.max(global.confidence, 0.7) }
+  // si la ecuación cuadra, subimos ligeramente confianzas de los montos implicados
+  const okEquation = Math.abs((f.totalDue ?? 0) - round2(plus(f.amount) + plus(f.fees) + plus(f.other) + plus(f.taxes) - plus(f.discount))) <= 0.06
+  if (okEquation) {
+    ['amount','fees','other','taxes','discount','totalDue'].forEach(k => { if (f[k] != null) conf[k] = Math.min(0.98, (conf[k] || 0) + 0.05) })
+  }
 
-    return null
-}
+  const overall = Object.values(conf).reduce((a,b)=>a+b,0) / Math.max(1, Object.values(conf).length)
 
-export function parseTicket(ocrText, profileKey = 'mi_tienda') {
-    const profile = profiles[profileKey] ?? profiles.mi_tienda
-    let text = fixOcrRefGlitches(String(ocrText || ''))
-    text = norm(text)
-    text = fixOcrMonthGlitches(text)
-    text = fixOcrRefGlitches(text)
-    const fecha = findDate(text, profile)
-    const total = findTotal(text, profile)
-    const sucursal = findStore(text, profile)
-    const referencia = findReference(text, profile)
-
-
-  // score simple
-    const conf = {
-        fecha: fecha?.confidence ?? 0,
-        total: total?.confidence ?? 0,
-        sucursal: sucursal?.confidence ?? 0,
-        referencia: referencia?.confidence ?? 0,
-    }
-    const overall = Object.values(conf).reduce((a,b)=>a+b,0) / 4
-    const MIN_CONF = 0.80;
-
-    const fails = [];
-    if (!fecha?.value || conf.fecha < MIN_CONF)      fails.push(`fecha`);
-    if (total?.value == null || conf.total < MIN_CONF)   fails.push(`total`);
-    if (!sucursal?.value || conf.sucursal < MIN_CONF)    fails.push(`sucursal`);
-    if (!referencia?.value || conf.referencia < MIN_CONF) fails.push(`referencia`);
-
-    if (fails.length) {
-        throw new Error(
-            `No se detectaron los siguientes campos: ${fails.join(', ')}. ` +
-            ` Sube una foto con mejor calidad.`
-        );
-    }
-
-    return {
-        ok: overall >= 0.6,
-        fields: {
-            fecha: fecha?.value ?? null,
-            total: total?.value ?? null,
-            totalRaw: total?.raw ?? null,
-            sucursal: sucursal?.value ?? null,
-            referencia: referencia?.value ?? null,
-        },
+  return {
+    ok: true,
+    fields: {
+      fecha: fecha?.value ?? null,
+      referencia: referencia?.value ?? null,
+      amount: f.amount,
+      fees: f.fees,
+      other: f.other,
+      taxes: f.taxes,
+      discount: f.discount,
+      totalDue: f.totalDue,
+      recipient: f.recipient,
+      exchangeRate: f.exchangeRate,
+    },
     confidence: { ...conf, overall },
-    debug: { profile: profileKey }
-    }
+    issues
+  }
+}
+
+export function parseTicket(ocrText /*, profileKey = 'mi_tienda' */) {
+  const text = norm(ocrText)
+  return parseIntermex(text)
 }
