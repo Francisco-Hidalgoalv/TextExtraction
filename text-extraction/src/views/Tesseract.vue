@@ -1,5 +1,5 @@
 <script setup>
-import TesseractOcr from '../components/Tesseract.vue'  // ajusta la ruta si cambió
+import TesseractOcr from '../components/tesseract.vue'  // ajusta la ruta si cambió
 </script>
 
 <template>
