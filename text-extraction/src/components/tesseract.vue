@@ -40,8 +40,10 @@ const runOCR = async () => {
     const res = await extractTicketFromFile(file.value, {
       languages: 'eng+spa',
       onProgress: (p) => { if (p != null) progress.value = Math.round(p * 100) },
-      verbose: true
+      verbose: false
     })
+    text.value = res.text || ''  // ⬅️ guarda A/B/C para mostrar
+    parsed.value = parseTicket(text.value)
     text.value = res.text || ''
     parsed.value = parseTicket(text.value)
     console.log('parsed:', parsed.value)
@@ -86,14 +88,12 @@ onBeforeUnmount(revoke)
     <ul>
       <li><b>Fecha:</b> {{ parsed.fields.fecha || '—' }}</li>
       <li><b>Referencia:</b> {{ parsed.fields.referencia || '—' }}</li>
+      <li><b>Nombre del remitente:</b> {{ parsed.fields.sender?.name || '—' }}</li>
+      <li><b>Dirección 1:</b> {{ parsed.fields.sender?.address1 || '—' }}</li>
+      <li><b>Teléfono:</b> {{ parsed.fields.sender?.phone || '—' }}</li>
       <li><b>Monto (Amount):</b> {{ parsed.fields.amount ?? '—' }}</li>
-      <li><b>Fees:</b> {{ parsed.fields.fees ?? '—' }}</li>
-      <li><b>Otros:</b> {{ parsed.fields.other ?? '—' }}</li>
-      <li><b>Impuestos (Taxes):</b> {{ parsed.fields.taxes ?? '—' }}</li>
-      <li><b>Descuento:</b> {{ parsed.fields.discount ?? '—' }}</li>
       <li><b>Total a pagar (Total due):</b> {{ parsed.fields.totalDue ?? '—' }}</li>
       <li><b>Total al beneficiario:</b> {{ parsed.fields.recipient ?? '—' }}</li>
-      <li><b>Tipo de cambio:</b> {{ parsed.fields.exchangeRate ?? '—' }}</li>
     </ul>
 
     <div v-if="parsed.issues?.length" style="margin-top:.5rem">
