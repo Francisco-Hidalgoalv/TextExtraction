@@ -1,6 +1,4 @@
-// src/utils/parseTicket.js
-// Parser para ticket Intermex (sin perfiles externos)
-
+//Normaliza texto, quita diacríticos, espacios extra y líneas vacías
 const norm = (s) =>
   String(s ?? '')
     .normalize('NFD').replace(/\p{Diacritic}/gu, '')
@@ -8,9 +6,11 @@ const norm = (s) =>
     .replace(/[ \t]+\n/g, '\n')
     .trim()
 
+// Divide texto en líneas, normaliza espacios y quita líneas vacías
 const linesOf = (s) =>
   norm(s).split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
+// Normaliza monto a número, maneja formatos con coma y punto
 function normalizeAmount(raw) {
   if (!raw) return null
   const cleaned = raw.replace(/[^0-9.,-]/g, '')
@@ -29,8 +29,10 @@ function normalizeAmount(raw) {
   return Number.isFinite(v) ? v : null
 }
 
+// Regex para encontrar montos en formato US (con $ opcional y miles con coma o punto)
 const AMT_RX = /(?:USD|US\$|\$)?\s*([0-9]{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2}))/i
 
+// Busca un monto en líneas que siguen a una etiqueta específica
 function findByLabel(lines, labelRegexes, lookAhead = 2) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -46,6 +48,7 @@ function findByLabel(lines, labelRegexes, lookAhead = 2) {
   return null
 }
 
+// Busca una fecha en el texto
 function findDate(text) {
   let m = text.match(/\b(0?[1-9]|1[0-2])\/([0-2]?\d|3[01])\/(\d{4})(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?\b/i)
   if (m) {
@@ -66,8 +69,7 @@ function findDate(text) {
   return null
 }
 
-/* ---------------- Remitente/Sender ---------------- */
-
+// Busca la sección de remitente
 function findSenderSection(lines) {
   const startRx = /remitente\s*\/\s*sender\b/i
   const endRx = [
@@ -92,8 +94,7 @@ function findSenderSection(lines) {
   return { index: i, lines: section }
 }
 
-
-// helpers mínimos en el mismo archivo (arriba del parser, si no los tienes ya)
+// helpers mínimos en el mismo archivo
 const ALLOWED_SHORT = new Set([
   'de','del','la','las','los','y','da','do','das','dos','san','santa',
   'mc','mac','van','von','di','du','le','lo','el'
@@ -108,13 +109,10 @@ function cleanNameCandidate(s) {
     .replace(/\s{2,}/g, ' ')
     .trim()
 
-  // 2) tokeniza por palabras (¡ahora sí!): 
   let parts = t.split(/\s+/)
 
-  // 3) quita tokens de 1 letra salvo conectores válidos
   parts = parts.filter(p => p.length >= 2 || ALLOWED_SHORT.has(p.toLowerCase()))
 
-  // 4) quita "colas" de 1–2 letras al final si no son conectores válidos
   while (parts.length >= 2) {
     const last = parts[parts.length - 1].toLowerCase()
     if (last.length <= 2 && !ALLOWED_SHORT.has(last)) parts.pop()
@@ -122,12 +120,68 @@ function cleanNameCandidate(s) {
   }
 
   const name = parts.join(' ').trim()
-  // 5) exige ≥5 letras totales para evitar ruido como "pe", "eas"
   if (lettersOnlyCount(name) < 5) return null
   return name
 }
 
+// Heurística para extraer beneficiario
+function findBeneficiarySection(lines) {
+  const startRx = /beneficiario\s*\/\s*beneficiary\b/i
+  const endRx = [
+    /remitente\s*\/\s*sender/i,
+    /pagador\s*\/\s*payer/i,
+    /giro\s*\/\s*wire/i,
+    /monto\s*\/\s*transfer amount/i,
+    /total a pagar\s*\/\s*total due/i
+  ]
+  const i = lines.findIndex(l => startRx.test(l))
+  if (i < 0) return null
 
+  const MAX = Math.min(lines.length - 1, i + 8) // no más de 8 líneas hacia abajo
+  let end = MAX
+  for (let j = i + 1; j <= MAX; j++) {
+    if (endRx.some(rx => rx.test(lines[j]))) { end = j - 1; break }
+  }
+
+  // limpia líneas vacías y quita la etiqueta inicial
+  const section = lines.slice(i + 1, end + 1).map(s => s.trim()).filter(Boolean)
+  return {
+    index: i,
+    lines: section
+  }
+}
+
+// Heurística para extraer país
+function parseCountryLabeled(s) {
+  const m = s.match(/pa[ií]s\s*\/\s*country\s*[:\-]?\s*([A-Za-zÁÉÍÓÚÜÑ.\- '\u00C0-\u017F]{2,})/i)
+  if (!m) return null
+  return m[1].replace(/\s{2,}/g,' ').trim()
+}
+
+// Heurística para extraer ciudad y estado sin código postal
+function parseCityStateNoZip(s) {
+  const m = s.match(/^([A-Za-z .,'-]+)[,\s]+([A-Za-z .'-]{2,})$/i)
+  if (!m) return null
+  const city = m[1].replace(/\s+/g,' ').trim()
+  const state = m[2].replace(/\s+/g,' ').trim()
+  return { city, state }
+}
+
+// limpia una línea de dirección
+function cleanAddressLine(s) {
+  if (!s) return s
+  let t = String(s)
+    .replace(/[^A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ' -#.,]/g, ' ')  // deja letras/numeros/espacios/guiones/apóstrofes
+    .replace(/\s{2,}/g, ' ')  // normaliza espacios
+    .replace(/\s*[-,.\s]+$/g, '')
+    .replace(/,\s*,+/g, ', ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  t = t.replace(/\b[\p{L}]{1,2}\b$/u, '').trim() // quita última palabra corta (1-2 letras)
+  return t
+}
+
+// Formatea un número de teléfono US
 function parseUSPhone(s) {
   // acepta "Teléfono/Phone: 8456640506" o "(845) 664-0506"
   const m = s.match(/(?:tel[eé]fono|phone)[:\s-]*([\+\d\(\)\-\s]{7,})/i) || s.match(/([\+\d\(\)\-\s]{10,})/)
@@ -139,12 +193,25 @@ function parseUSPhone(s) {
   return `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}`
 }
 
+// Heurística para identificar un número de teléfono con formato suelto
+function parsePhoneLoose(s) {
+  const m = s.match(/(?:tel[eé]fono|phone)[:\s-]*([\+\d\(\)\-\s]{7,})/i) 
+        || s.match(/([\+\d\(\)\-\s]{7,})/i);
+  if (!m) return null;
+  const hasPlus = m[1].includes('+');
+  const digits = m[1].replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 15) return null;
+  return hasPlus ? `+${digits}` : digits; // no formateo US
+}
+
+// Heurística para identificar una calle
 function looksLikeStreet(s) {
   // heurística para 1a línea de dirección
   if (/\d/.test(s) === false) return false
   return /\b(ave|av|avenue|st|street|rd|road|blvd|suite|ste|apt|#|calle|av\.)\b/i.test(s)
 }
 
+// Heurística para identificar una ciudad, estado y código postal
 function parseCityStateZip(s) {
   // "HAVERSTRAW, NEW YORK 10927" | "HAVERSTRAW NY 10927"
   let m = s.match(/^([A-Za-z .,'-]+)[,\s]+([A-Za-z]{2,}|[A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/i)
@@ -161,6 +228,7 @@ function parseCityStateZip(s) {
   return null
 }
 
+// Extrae remitente de líneas, con heurísticas mejoradas
 function extractSender(lines) {
   const sec = findSenderSection(lines)
   if (!sec || !sec.lines.length) return { sender: null, conf: 0 }
@@ -180,25 +248,38 @@ function extractSender(lines) {
   }
 
   // 2) dirección y ciudad/estado/zip + teléfono
-  for (const ln of sec.lines) {
+  for (let idx = 0; idx < sec.lines.length; idx++) {
+    const ln = sec.lines[idx];
+  
+    // Teléfono
     if (!phone) {
-      const ph = parseUSPhone(ln)
-      if (ph) phone = ph
+      const ph = parseUSPhone(ln);
+      if (ph) phone = ph;
     }
+  
+    // Ciudad/Estado/ZIP
     if (!city) {
-      const csz = parseCityStateZip(ln)
-      if (csz) { city = csz.city; state = csz.state; postal = csz.postal; continue }
+      const csz = parseCityStateZip(ln);
+      if (csz) { city = csz.city; state = csz.state; postal = csz.postal; continue; }
     }
-    if (!address1 && looksLikeStreet(ln)) { address1 = ln; continue }
-    if (!address2 && address1 && ln !== name && !/phone|telefono/i.test(ln) && !parseCityStateZip(ln)) {
-      // posible segunda línea (p. ej., APT/SUITE)
-      if (/\b(apt|suite|ste|#)\b/i.test(ln) || (!/\d/.test(ln) && ln.length < 20)) {
-        address2 = ln
+  
+    // Dirección (solo address1) con limpieza
+    if (!address1 && looksLikeStreet(ln)) {
+      let cleaned = cleanAddressLine(ln);
+    
+      // OPCIONAL: pegar suite/apt de la siguiente línea si existe
+      const next = sec.lines[idx + 1];
+      if (cleaned && next && /\b(apt|suite|ste|unit|#)\b/i.test(next)) {
+        const nextClean = cleanAddressLine(next);
+        if (nextClean) cleaned = `${cleaned} ${nextClean}`;
       }
+    
+      address1 = cleaned;
+      continue;
     }
   }
 
-  // Confianzas heurísticas
+// Confidence
   const conf = {
     senderName: name ? 0.85 : 0,
     senderPhone: phone ? 0.9 : 0,
@@ -217,8 +298,94 @@ function extractSender(lines) {
   }
 }
 
-/* ---------------- Montos/fecha/ID como antes ---------------- */
+//Extraer beneficiario de líneas, con heurísticas mejoradas
+function extractBeneficiary(lines) {
+  const sec = findBeneficiarySection(lines)
+  if (!sec || !sec.lines.length) return { beneficiary: null, conf: {beneficiaryOverall: 0} }
+  let name = null, nameIdx = -1, address1 = null, phone, city = null, state = null, postal = null, country = null
 
+  // 1) nombre = primera línea no vacía que NO parezca teléfono ni dirección
+  for (const [i, ln] of sec.lines.entries()) {
+    if (parseUSPhone(ln)) continue
+    if (looksLikeStreet(ln)) continue
+    if (/\d/.test(ln)) continue // si trae muchos dígitos, probablemente no sea nombre
+    if (ln.length < 4) continue // Si el nombre tiene menos de 4 letras, continúa
+    const candidate = cleanNameCandidate(ln);  // ← limpia y valida
+    if (!candidate) continue
+    name = candidate
+    nameIdx = i // guarda el índice del nombre
+    break
+  }
+  
+  // 2) dirección y ciudad/estado/zip + teléfono
+  for (let i = 0; i < sec.lines.length; i++) {
+    const ln = sec.lines[i]
+
+    // País (con etiqueta)
+    if (!country) {
+      const c = parseCountryLabeled(ln)
+      if (c) { country = c; continue }
+    }
+
+    // Teléfono
+    if (!phone) {
+      const ph = parsePhoneLoose(ln)
+      if (ph) { phone = ph; continue }
+    }
+
+    if (nameIdx >= 0 && !address1 && i > nameIdx) {
+      // evita agarrar etiquetas u otras secciones
+      const stopRx = /(tel[eé]fono|phone|pa[ií]s\s*\/\s*country|monto|amount|giro|wire|total|tipo de cambio|exchange rate)/i;
+
+      // limpia la línea y descarta ruido muy corto
+      let cleaned = cleanAddressLine(ln);
+      const lettersDigits = (cleaned.match(/[A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ]/g) || []).length;
+
+      if (!stopRx.test(ln) && lettersDigits >= 5) {
+        address1 = cleaned;
+
+        // (Opcional) si la siguiente línea es SUITE/APT/UNIT, apéndala a address1
+        const next = sec.lines[i + 1];
+        if (next && /\b(apt|suite|ste|unit|#)\b/i.test(next)) {
+          const nextClean = cleanAddressLine(next);
+          if (nextClean) address1 = `${address1} ${nextClean}`;
+        }
+
+        continue;
+      }
+    }
+  }
+
+  // Si no se encontró país en la sección, intenta buscar cerca (2-3 líneas después del bloque)
+  if (!country) {
+    const after = lines.slice(sec.index + 1, sec.index + 1 + 12) // ventanita generosa
+    for (const ln of after) {
+      const c = parseCountryLabeled(ln)
+      if (c) { country = c; break }
+    }
+  }
+
+  // Confidence
+  const conf = {
+    beneficiaryName: name ? 0.90 : 0,
+    beneficiaryPhone: phone ? 0.85 : 0,
+    beneficiaryAddress: address1 ? 0.90 : 0.,
+    beneficiaryCity: city ? 0.88 : 0,
+    beneficiaryState: state ? 0.88 : 0,
+    beneficiaryPostal: postal ? 0.90 : 0,
+    beneficiaryCountry: country ? 0.92 : 0
+  }
+
+  const beneficiaryOverall = Object.values(conf).reduce((a, b) => a + b, 0) / Object.keys(conf).length
+
+  return {
+    beneficiary: { name, address1, city, state, postalCode: postal, phone, country },
+    conf: { ...conf, beneficiaryOverall }
+  }
+}
+
+
+// Exporta la función principal de parseo
 function parseIntermex(text) {
   const L = linesOf(text)
 
@@ -313,18 +480,50 @@ function parseIntermex(text) {
     ['amount','fees','other','taxes','discount','totalDue'].forEach(k => { if (f[k] != null) confMoney[k] = Math.min(0.98, (confMoney[k] || 0) + 0.05) })
   }
 
-  // Remitente
+  // Extrae remitente
   const senderRes = extractSender(L)
   const sender = senderRes.sender
-  const confSender = senderRes.conf
+  const confSender = senderRes.conf || {}
+  const {senderOverall, ...confSenderNoOverall} = confSender
 
-  const overall = (() => {
-    const vals = [
-      ...Object.values(confMoney),
-      ...(Object.values(confSender))
-    ].filter(v => typeof v === 'number')
-    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : 0
-  })()
+  // Extrae beneficiario
+  const beneficiaryRes = extractBeneficiary(L)
+  const beneficiary = beneficiaryRes.beneficiary
+  const confBeneficiary = beneficiaryRes.conf || {}
+  const {beneficiaryOverall, ...confBeneficiaryNoOverall} = confBeneficiary
+
+  function avgPresent(pairs) {
+    const vals = pairs.map(([has, v]) => has ? v : null).filter(v => v != null)
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0
+  }
+
+  const overall = avgPresent([
+    [!!fecha?.value,           confMoney.fecha],
+    [!!referencia?.value,      confMoney.referencia],
+    [f.amount != null,         confMoney.amount],
+    [f.fees != null,           confMoney.fees],
+    [f.other != null,          confMoney.other],
+    [f.taxes != null,          confMoney.taxes],
+    [f.discount != null,       confMoney.discount],
+    [f.totalDue != null,       confMoney.totalDue],
+    [f.recipient != null,      confMoney.recipient],
+    [f.exchangeRate != null,   confMoney.exchangeRate],
+
+    [!!sender?.name,           confSenderNoOverall.senderName],
+    [!!sender?.address1,       confSenderNoOverall.senderAddress],
+    [!!sender?.city,           confSenderNoOverall.senderCity],
+    [!!sender?.state,          confSenderNoOverall.senderState],
+    [!!sender?.postalCode,     confSenderNoOverall.senderPostal],
+    [!!sender?.phone,          confSenderNoOverall.senderPhone],
+
+    [!!beneficiary?.name,      confBeneficiaryNoOverall.beneficiaryName],
+    [!!beneficiary?.address1,  confBeneficiaryNoOverall.beneficiaryAddress],
+    [!!beneficiary?.city,      confBeneficiaryNoOverall.beneficiaryCity],
+    [!!beneficiary?.state,     confBeneficiaryNoOverall.beneficiaryState],
+    [!!beneficiary?.postalCode,confBeneficiaryNoOverall.beneficiaryPostal],
+    [!!beneficiary?.phone,     confBeneficiaryNoOverall.beneficiaryPhone],
+    [!!beneficiary?.country,   confBeneficiaryNoOverall.beneficiaryCountry]
+  ])
 
   return {
     ok: true,
@@ -339,10 +538,10 @@ function parseIntermex(text) {
       totalDue: f.totalDue,
       recipient: f.recipient,
       exchangeRate: f.exchangeRate,
-      // remitente:
-      sender
+      sender,
+      beneficiary
     },
-    confidence: { ...confMoney, ...confSender, overall },
+    confidence: { ...confMoney, ...confSenderNoOverall, senderOverall, ...confBeneficiaryNoOverall, beneficiaryOverall, overall },
     issues
   }
 }
