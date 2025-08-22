@@ -62,6 +62,7 @@ async function send() {
       <textarea class="output" v-model="text" rows="12" readonly
                 placeholder="Aquí aparecerá el texto…" />
     </section>
+    <button @click="$router.push('/')">Volver al menú</button>
   </div>
 </template>
 

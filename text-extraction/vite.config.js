@@ -12,6 +12,12 @@ export default defineConfig({
         secure: true,
         rewrite: (p) => p.replace(/^\/n8n-webhook/, '/webhook'),
       },
+      '/n8n-webhook-test': {
+        target: 'https://n8n.dwitmexico.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: p => p.replace(/^\/n8n-webhook-test/, '/webhook-test'),
+      },
     },
   },
 })
