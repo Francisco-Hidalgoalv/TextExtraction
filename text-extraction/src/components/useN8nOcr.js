@@ -15,9 +15,12 @@ export function useN8nOcr() {
     const json = await res.json();
 
     // La respuesta está anidada en varios objetos
-    const text = json?.responses?.[0]?.fullTextAnnotation?.text || '';
+  // Accede a los valores directamente desde el objeto JSON
+  const remitente = json?.["remitente/sender"] || '';
+  const beneficiario = json?.["beneficiario/beneficiary"] || '';
+  const monto = json?.monto_transferencia || '';
 
-    return { text, raw: json };
+    return { raw: json };
   }
 
   return { run };

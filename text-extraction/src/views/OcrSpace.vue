@@ -26,9 +26,8 @@ async function send() {
   error.value = ''
   text.value = ''
   try {
-    const { text: t } = await run(file.value)
-    text.value = t
-    // (opcional) const parsed = parseTicket(t)
+    const { raw } = await run(file.value)
+    text.value = JSON.stringify(raw, null, 2)
   } catch (err) {
     error.value = String(err?.message || err)
   } finally {
